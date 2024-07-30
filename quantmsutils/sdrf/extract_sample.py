@@ -1,6 +1,7 @@
 from pathlib import Path
-import pandas as pd
+
 import click
+import pandas as pd
 
 
 @click.command(

@@ -30,17 +30,22 @@ def print_error(error, context="Line", context_str=""):
     sys.exit(1)
 
 
-def check_sdrf(check_ms, sdrf):
+def check_sdrf(check_ms, sdrf, validate_ontologies):
     df = SdrfDataFrame.parse(sdrf)
-    errors = df.validate(DEFAULT_TEMPLATE)
-    if check_ms:
-        errors = errors + df.validate(MASS_SPECTROMETRY)
-    for error in errors:
-        print(error)
-    if not errors:
-        print("Everying seems to be fine. Well done.")
+    if validate_ontologies:
+        errors = df.validate(DEFAULT_TEMPLATE)
+        if check_ms:
+            errors = errors + df.validate(MASS_SPECTROMETRY)
+        for error in errors:
+            print(error)
+        if not errors:
+            print("Everying seems to be fine. Well done.")
+        else:
+            print("There were validation errors!")
     else:
-        print("There were validation errors!")
+        errors = False
+        print("No ontology term validation was performed.")
+
     sys.exit(bool(errors))
 
 
@@ -117,6 +122,9 @@ def check_expdesign_logic(f_table, s_table):
     default=False,
 )
 @click.option(
+    "--validate_ontologies", help="Validate the ontologies", is_flag=True, default=False
+)
+@click.option(
     "-in",
     "--input_file",
     type=click.Path(exists=True),
@@ -124,11 +132,13 @@ def check_expdesign_logic(f_table, s_table):
     help="Input SDRF or Expdesign file",
 )
 @click.pass_context
-def check_samplesheet(ctx, is_sdrf: bool, check_ms: bool, input_file: str) -> None:
+def check_samplesheet(
+    ctx, is_sdrf: bool, check_ms: bool, validate_ontologies: bool, input_file: str
+) -> None:
     """
     Check the samplesheet for errors.
     """
     if is_sdrf:
-        check_sdrf(check_ms, input_file)
+        check_sdrf(check_ms, input_file, validate_ontologies)
     else:
         check_expdesign(input_file)

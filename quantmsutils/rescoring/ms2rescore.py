@@ -2,26 +2,36 @@
 # Contributions by Yasset Perez-Riverol and Dai Chengxin
 # This script is part of the quantmsutils package
 
-import click
 import importlib.resources
 import json
 import logging
 from typing import List
 
-from ms2rescore import package_data, rescore
-from psm_utils.io.idxml import IdXMLReader, IdXMLWriter
-from psm_utils import PSMList
+import click
 import pyopenms as oms
+from ms2rescore import package_data, rescore
+from psm_utils import PSMList
+from psm_utils.io.idxml import IdXMLReader, IdXMLWriter
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
-def parse_cli_arguments_to_config(config_file: str = None, feature_generators: str = None, ms2pip_model: str = None,
-                                  ms2_tolerance: float = None, calibration_set_size: float = None,
-                                  rescoring_engine: str = None, rng: int = None, test_fdr: float = None,
-                                  processes: int = None, spectrum_path: str = None, fasta_file: str = None,
-                                  id_decoy_pattern: str = None, lower_score_is_better: bool = None,
-                                  output_path: str = None) -> dict:
+def parse_cli_arguments_to_config(
+    config_file: str = None,
+    feature_generators: str = None,
+    ms2pip_model: str = None,
+    ms2_tolerance: float = None,
+    calibration_set_size: float = None,
+    rescoring_engine: str = None,
+    rng: int = None,
+    test_fdr: float = None,
+    processes: int = None,
+    spectrum_path: str = None,
+    fasta_file: str = None,
+    id_decoy_pattern: str = None,
+    lower_score_is_better: bool = None,
+    output_path: str = None,
+) -> dict:
     if config_file is None:
         config = json.load(
             importlib.resources.open_text(package_data, "config_default.json")
@@ -83,7 +93,7 @@ def parse_cli_arguments_to_config(config_file: str = None, feature_generators: s
     if lower_score_is_better is not None:
         config["ms2rescore"]["lower_score_is_better"] = lower_score_is_better
     if processes is None:
-        processes = 1 # Default to single process
+        processes = 1  # Default to single process
     config["ms2rescore"]["processes"] = processes
     if output_path is not None:
         config["ms2rescore"]["output_path"] = output_path
@@ -222,8 +232,8 @@ def filter_out_artifact_psms(
 @click.option(
     "-re",
     "--rescoring_engine",
-    help="Either mokapot or percolator (default: `mokapot`)",
-    default="mokapot",
+    help="Either mokapot or percolator (default: `percolator`)",
+    default="percolator",
     type=click.Choice(["mokapot", "percolator"]),
 )
 @click.option(
@@ -295,6 +305,14 @@ def ms2rescore(
 
     if output_path is None:
         output_path = psm_file.replace(".idXML", "_ms2rescore.idXML")
+
+    if rescoring_engine == "moakapot":
+        logging.warning(
+            "Mokapot rescoring engine is not supported in this version. Please use Percolator."
+        )
+        raise ValueError(
+            "Mokapot rescoring engine is not supported in this version. Please use Percolator."
+        )
 
     config = parse_cli_arguments_to_config(
         config_file=config_file,

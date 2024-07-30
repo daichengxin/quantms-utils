@@ -1,9 +1,10 @@
-from pathlib import Path
-import sqlite3
 import re
+import sqlite3
+from pathlib import Path
 
 import click
 import pandas as pd
+import pyarrow
 from pyopenms import MSExperiment, MzMLFile
 
 
@@ -22,6 +23,7 @@ def mzml_statistics(ctx, ms_path: str, id_only: bool = False) -> None:
     # Command line usage example
     python script_name.py mzml_statistics --ms_path "path/to/file.mzML"
 
+    :param ctx: Click context
     :param ms_path: A string specifying the path to the mass spectrometry file.
     :param id_only: A boolean flag that, when set to True, generates a CSV file containing only the spectrum ID and
     peaks data for MS level 2 spectra.
@@ -40,6 +42,14 @@ def mzml_statistics(ctx, ms_path: str, id_only: bool = False) -> None:
     ]
 
     def parse_mzml(file_name: str, file_columns: list, id_only: bool = False):
+        """
+        Parse mzML file and return a pandas DataFrame with the information. If id_only is True, it will also save a csv.
+        @param file_name: The file name of the mzML file
+        @param file_columns: The columns of the DataFrame
+        @param id_only: If True, it will save a csv with the spectrum id, mz and intensity
+        @return: A pandas DataFrame with the information of the mzML file
+        """
+
         info = []
         psm_part_info = []
         exp = MSExperiment()
@@ -122,12 +132,7 @@ def mzml_statistics(ctx, ms_path: str, id_only: bool = False) -> None:
         if id_only and len(psm_part_info) > 0:
             pd.DataFrame(
                 psm_part_info, columns=["scan", "ms_level", "mz", "intensity"]
-            ).to_csv(
-                f"{Path(ms_path).stem}_spectrum_df.csv",
-                mode="w",
-                index=False,
-                header=True,
-            )
+            ).to_parquet(f"{Path(ms_path).stem}_spectrum_df.parquet", index=False, compression="gzip")
 
         return pd.DataFrame(info, columns=file_columns)
 
@@ -167,7 +172,7 @@ def mzml_statistics(ctx, ms_path: str, id_only: bool = False) -> None:
         except sqlite3.OperationalError as e:
             if "no such table: Precursors" in str(e):
                 print(
-                    f"No precursers recorded in {file_name}, This is normal for DIA data."
+                    f"No precursors recorded in {file_name}, This is normal for DIA data."
                 )
                 precursor_df = pd.DataFrame()
             else:
@@ -218,13 +223,9 @@ def mzml_statistics(ctx, ms_path: str, id_only: bool = False) -> None:
     elif Path(ms_path).suffix in [".mzML", ".mzml"]:
         ms_df = parse_mzml(ms_path, file_columns, id_only)
     else:
-        msg = f"Unrecognized or inexistent mass spec file '{ms_path}'"
+        msg = f"Unrecognized or the mass spec file '{ms_path}' do not exist"
         raise RuntimeError(msg)
 
-    ms_df.to_csv(
-        f"{Path(ms_path).stem}_ms_info.tsv",
-        mode="w",
-        sep="\t",
-        index=False,
-        header=True,
+    ms_df.to_parquet(
+        f"{Path(ms_path).stem}_ms_info.parquet", engine="pyarrow", index=False, compression="gzip"
     )

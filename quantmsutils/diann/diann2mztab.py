@@ -11,7 +11,7 @@ import os
 import re
 import warnings
 from pathlib import Path
-from typing import Any, List, Tuple, Dict, Set, Union
+from typing import Any, Dict, List, Set, Tuple, Union
 
 import click
 import numpy as np
@@ -61,7 +61,7 @@ def diann2mztab(
     :param folder: DiannConvert specifies the folder where the required file resides. The folder contains
         the DiaNN main report, protein matrix, precursor matrix, experimental design file, protein sequence
         FASTA file, version file of DiaNN and ms_info TSVs
-    ?:param exp_design: Experimental design file
+    :param exp_design: Experimental design file
     :param dia_params: A list contains DIA parameters
     :type dia_params: list
     :param diann_version: Path to a version file of DIA-NN
@@ -373,7 +373,7 @@ class DiannDirectory:
         charge: int,
         missed_cleavages: int,
         dia_params: List[Any],
-        out: os.PathLike,
+        out: Union[os.PathLike, str],
     ) -> None:
         logger.info("Converting to mzTab")
         self.validate_diann_version()
