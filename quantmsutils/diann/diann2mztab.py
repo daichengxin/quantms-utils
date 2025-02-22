@@ -19,6 +19,13 @@ import pandas as pd
 from pyopenms import AASequence, FASTAFile, ModificationsDB
 from pyopenms.Constants import PROTON_MASS_U
 
+from quantmsutils.utils.constants import (
+    MS_LEVEL,
+    RETENTION_TIME,
+    SCAN,
+    EXPERIMENTAL_MASS_TO_CHARGE,
+)
+
 pd.set_option("display.max_rows", 500)
 pd.set_option("display.max_columns", 500)
 pd.set_option("display.width", 1000)
@@ -26,15 +33,11 @@ pd.set_option("display.width", 1000)
 CONTEXT_SETTINGS = dict(help_option_names=["-h", "--help"])
 REVISION = "0.1.1"
 
-logging.basicConfig(
-    format="%(asctime)s [%(funcName)s] - %(message)s", level=logging.DEBUG
-)
+logging.basicConfig(format="%(asctime)s [%(funcName)s] - %(message)s", level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 
-@click.command(
-    "diann2mztab", short_help="Convert DIA-NN output to MSstats, Triqler or mzTab"
-)
+@click.command("diann2mztab", short_help="Convert DIA-NN output to MSstats, Triqler or mzTab")
 @click.option("--folder", "-f")
 @click.option("--exp_design", "-d")
 @click.option("--diann_version", "-v")
@@ -42,6 +45,7 @@ logger = logging.getLogger(__name__)
 @click.option("--charge", "-c")
 @click.option("--missed_cleavages", "-m")
 @click.option("--qvalue_threshold", "-q", type=float)
+@click.option("--enable_diann2mztab", "-e", is_flag=True)
 @click.pass_context
 def diann2mztab(
         ctx,
@@ -52,6 +56,7 @@ def diann2mztab(
         charge,
         missed_cleavages,
         qvalue_threshold,
+        enable_diann2mztab
 ):
     """
     Convert DIA-NN output to MSstats, Triqler or mzTab.
@@ -72,6 +77,7 @@ def diann2mztab(
     :type missed_cleavages: int
     :param qvalue_threshold: Threshold for filtering q value
     :type qvalue_threshold: float
+    :param enable_diann2mztab: Enable conversion to mzTab
     """
     logger.debug(f"Revision {REVISION}")
     logger.debug("Reading input files...")
@@ -85,37 +91,34 @@ def diann2mztab(
         "Modified.Sequence",
         "Precursor.Charge",
         "Precursor.Quantity",
-        "File.Name",
         "Run",
     ]
 
     logger.debug("Converting to MSstats format...")
-    out_msstats = report[msstats_columns_keep]
+    # Filter Decoy precursors for MSstats analysis, the decoy PSMs are only store in mzTab
+    if "Decoy" in report.columns:
+        out_msstats = report[report["Decoy"] != 1]
+        out_msstats = out_msstats[msstats_columns_keep]
+    else:
+        out_msstats = report[msstats_columns_keep]
     out_msstats.columns = [
         "ProteinName",
         "PeptideSequence",
         "PrecursorCharge",
         "Intensity",
-        "Reference",
         "Run",
     ]
     out_msstats = out_msstats[out_msstats["Intensity"] != 0]
 
-    # Q: What is this line doing?
+    # Convert Unimod ID to modification name and replace ^ with DECOY_
     out_msstats.loc[:, "PeptideSequence"] = out_msstats.apply(
-        lambda x: AASequence.fromString(x["PeptideSequence"]).toString(), axis=1
+        lambda x: AASequence.fromString(x["PeptideSequence"]).toString() if "^" not in x["PeptideSequence"] else
+        "^" + AASequence.fromString(x["PeptideSequence"].replace("^", "")).toString(),
+        axis=1
     )
     out_msstats["FragmentIon"] = "NA"
     out_msstats["ProductCharge"] = "0"
     out_msstats["IsotopeLabelType"] = "L"
-    unique_reference_map = {
-        k: os.path.basename(k) for k in out_msstats["Reference"].unique()
-    }
-    out_msstats["Reference"] = out_msstats["Reference"].map(unique_reference_map)
-    del unique_reference_map
-
-    logger.debug("\n\nReference Column >>>")
-    logger.debug(out_msstats["Reference"])
 
     logger.debug(f"\n\nout_msstats ({out_msstats.shape}) >>>")
     logger.debug(out_msstats.head(5))
@@ -176,16 +179,17 @@ def diann2mztab(
     logger.info(f"Triqler input file is saved as {exp_out_prefix}_triqler_in.tsv")
     del out_triqler
 
-    mztab_out = f"{Path(exp_design).stem}_out.mzTab"
-    # Convert to mzTab
-    diann_directory.convert_to_mztab(
-        report=report,
-        f_table=f_table,
-        charge=charge,
-        missed_cleavages=missed_cleavages,
-        dia_params=dia_params,
-        out=mztab_out,
-    )
+    if enable_diann2mztab:
+        mztab_out = f"{Path(exp_design).stem}_out.mzTab"
+        # Convert to mzTab
+        diann_directory.convert_to_mztab(
+            report=report,
+            f_table=f_table,
+            charge=charge,
+            missed_cleavages=missed_cleavages,
+            dia_params=dia_params,
+            out=mztab_out,
+        )
 
 
 def _true_stem(x):
@@ -224,9 +228,7 @@ def get_exp_design_dfs(exp_design_file):
         f_table = [i.replace("\n", "").split("\t") for i in data[1:empty_row]]
         f_header = data[0].replace("\n", "").split("\t")
         f_table = pd.DataFrame(f_table, columns=f_header)
-        f_table.loc[:, "run"] = f_table.apply(
-            lambda x: _true_stem(x["Spectra_Filepath"]), axis=1
-        )
+        f_table.loc[:, "run"] = f_table.apply(lambda x: _true_stem(x["Spectra_Filepath"]), axis=1)
 
         s_table = [i.replace("\n", "").split("\t") for i in data[empty_row + 1:]][1:]
         s_header = data[empty_row + 1].replace("\n", "").split("\t")
@@ -256,6 +258,9 @@ def compute_mass_modified_peptide(peptide_seq: str) -> float:
         "O": "X[237.14773053312]",  # 255.158295 - 17.003288 - 1.00727646688
     }
     for aa in peptide_seq:
+        # DIA-NN Decoy tag
+        if aa == "^":
+            continue
         # Check if the letter is in aminoacid
         if aa == "(":
             not_mod = False
@@ -294,6 +299,7 @@ def compute_mass_modified_peptide(peptide_seq: str) -> float:
             logger.info(f"Unknown amino acid with mass not known:{aa}")
         peptide_parts.append(aa)
     new_peptide_seq = "".join(peptide_parts)
+    # DIA-NN maybe output "^", see https://github.com/vdemichev/DiaNN/issues/1404
     mass = AASequence.fromString(new_peptide_seq).getMonoWeight()
     logger.debug(new_peptide_seq + ":" + str(mass))
     return mass
@@ -323,7 +329,11 @@ class DiannDirectory:
 
     @property
     def report(self) -> os.PathLike:
-        return self.find_first_file_with_suffix("report.tsv")
+        # DIA-NN 1.8.1 return tsv format, but DIA-NN 2.0 only return parquet
+        try:
+            return self.find_first_file_with_suffix("report.tsv")
+        except FileNotFoundError:
+            return self.find_first_file_with_suffix("report.parquet")
 
     @property
     def pg_matrix(self) -> os.PathLike:
@@ -355,14 +365,12 @@ class DiannDirectory:
                     diann_version_id = line.rstrip("\n").split(": ")[1]
 
         if diann_version_id is None:
-            raise ValueError(
-                f"Could not find DIA-NN version in file {self.diann_version_file}"
-            )
+            raise ValueError(f"Could not find DIA-NN version in file {self.diann_version_file}")
 
         return diann_version_id
 
     def validate_diann_version(self) -> None:
-        supported_diann_versions = ["1.8.1", "1.9.beta.1", "1.9.2"]
+        supported_diann_versions = ["1.8.1", "2.0", "2.0.1", "2.0.2"]
         if self.diann_version not in supported_diann_versions:
             raise ValueError(f"Unsupported DIANN version {self.diann_version}")
 
@@ -396,21 +404,21 @@ class DiannDirectory:
         index_ref = f_table.copy()
         index_ref.rename(
             columns={
-                "Fraction_Group": "ms_run",
+                "Fraction_Group": "assay",
                 "Sample": "study_variable",
                 "run": "Run",
             },
             inplace=True,
         )
-        index_ref["ms_run"] = index_ref["ms_run"].astype("int")
+        index_ref["assay"] = index_ref["assay"].astype("int")
         index_ref["study_variable"] = index_ref["study_variable"].astype("int")
         report = report.merge(
-            index_ref[["ms_run", "Run", "study_variable"]],
+            index_ref[["assay", "Run", "study_variable"]],
             on="Run",
             validate="many_to_one",
         )
 
-        mtd, database = mztab_mtd(
+        mtd, database, ms_run_index = mztab_mtd(
             index_ref, dia_params, str(self.fasta), charge, missed_cleavages, self.diann_version
         )
         pg = pd.read_csv(
@@ -418,7 +426,7 @@ class DiannDirectory:
             sep="\t",
             header=0,
         )
-        prh = mztab_prh(report, pg, index_ref, database, fasta_df)
+        prh = mztab_prh(report, pg, index_ref, database, fasta_df, self.diann_version)
         del pg
         pr = pd.read_csv(
             self.pr_matrix,
@@ -426,9 +434,9 @@ class DiannDirectory:
             header=0,
         )
         precursor_list = list(report["Precursor.Id"].unique())
-        peh = mztab_peh(report, pr, precursor_list, index_ref, database)
+        peh = mztab_peh(report, pr, precursor_list, index_ref, database, ms_run_index)
         del pr
-        psh = mztab_psh(report, str(self.base_path), database)
+        psh = mztab_psh(report, str(self.base_path), database, ms_run_index)
         del report
         mtd.loc["", :] = ""
         prh.loc[len(prh) + 1, :] = ""
@@ -443,15 +451,12 @@ class DiannDirectory:
 
     def main_report_df(self, qvalue_threshold: float) -> pd.DataFrame:
         remain_cols = [
-            "File.Name",
             "Run",
             "Protein.Group",
             "Protein.Names",
             "Protein.Ids",
-            "First.Protein.Description",
             "PG.MaxLFQ",
             "RT",
-            "MS2.Scan",
             "Global.Q.Value",
             "Lib.Q.Value",
             "PEP",
@@ -462,10 +467,13 @@ class DiannDirectory:
             "Stripped.Sequence",
             "Precursor.Charge",
             "Precursor.Quantity",
-            "Global.PG.Q.Value",
-            "MS2.Scan"
+            "Global.PG.Q.Value"
         ]
-        report = pd.read_csv(self.report, sep="\t", header=0, usecols=remain_cols)
+        if "2.0" not in self.diann_version:
+            report = pd.read_csv(self.report, sep="\t", header=0,
+                                 usecols=remain_cols + ["MS2.Scan"])
+        else:
+            report = pd.read_parquet(self.report, columns=remain_cols + ["Decoy"])
 
         # filter based on qvalue parameter for downstream analysiss
         logger.debug(
@@ -478,8 +486,7 @@ class DiannDirectory:
         # Making the map is 10x faster, and includes the mass of
         # the modification. with respect to the previous implementation.
         uniq_masses = {
-            k: compute_mass_modified_peptide(k)
-            for k in report["Modified.Sequence"].unique()
+            k: compute_mass_modified_peptide(k) for k in report["Modified.Sequence"].unique()
         }
         mass_vector = report["Modified.Sequence"].map(uniq_masses)
         report["Calculate.Precursor.Mz"] = (
@@ -488,9 +495,7 @@ class DiannDirectory:
 
         logger.debug("Indexing Precursors")
         # Making the map is 1500x faster
-        precursor_index_map = {
-            k: i for i, k in enumerate(report["Precursor.Id"].unique())
-        }
+        precursor_index_map = {k: i for i, k in enumerate(report["Precursor.Id"].unique())}
         report["precursor.Index"] = report["Precursor.Id"].map(precursor_index_map)
 
         logger.debug(f"Shape of main report {report.shape}")
@@ -521,9 +526,7 @@ def mtd_mod_info(fix_mod, var_mod):
             mod_name = mod_obj.getId()
             mod_accession = mod_obj.getUniModAccession()
             site = mod_obj.getOrigin()
-            fix_ptm.append(
-                ("[UNIMOD, " + mod_accession.upper() + ", " + mod_name + ", ]", site)
-            )
+            fix_ptm.append(("[UNIMOD, " + mod_accession.upper() + ", " + mod_name + ", ]", site))
     else:
         fix_flag = 0
         fix_ptm.append("[MS, MS:1002453, No fixed modifications searched, ]")
@@ -535,9 +538,7 @@ def mtd_mod_info(fix_mod, var_mod):
             mod_name = mod_obj.getId()
             mod_accession = mod_obj.getUniModAccession()
             site = mod_obj.getOrigin()
-            var_ptm.append(
-                ("[UNIMOD, " + mod_accession.upper() + ", " + mod_name + ", ]", site)
-            )
+            var_ptm.append(("[UNIMOD, " + mod_accession.upper() + ", " + mod_name + ", ]", site))
     else:
         var_flag = 0
         var_ptm.append("[MS, MS:1002454, No variable modifications searched, ]")
@@ -559,6 +560,8 @@ def mztab_mtd(index_ref, dia_params, fasta, charge, missed_cleavages, diann_vers
     :type charge: int
     :param missed_cleavages: Missed cleavages set by Dia-NN
     :type missed_cleavages: int
+    :param diann_version: Version of DIA-NN
+    :type diann_version: str
     :return: MTD sub-table
     :rtype: pandas.core.frame.DataFrame
     """
@@ -578,9 +581,7 @@ def mztab_mtd(index_ref, dia_params, fasta, charge, missed_cleavages, diann_vers
     out_mztab_mtd.loc[1, "mzTab-type"] = "Quantification"
     out_mztab_mtd.loc[1, "title"] = "ConsensusMap export from OpenMS"
     out_mztab_mtd.loc[1, "description"] = "OpenMS export from consensusXML"
-    out_mztab_mtd.loc[1, "protein_search_engine_score[1]"] = (
-        "[, , DIA-NN Global.PG.Q.Value, ]"
-    )
+    out_mztab_mtd.loc[1, "protein_search_engine_score[1]"] = "[, , DIA-NN Global.PG.Q.Value, ]"
     out_mztab_mtd.loc[1, "peptide_search_engine_score[1]"] = (
         "[, , DIA-NN Q.Value (minimum of the respective precursor q-values), ]"
     )
@@ -605,14 +606,10 @@ def mztab_mtd(index_ref, dia_params, fasta, charge, missed_cleavages, diann_vers
     out_mztab_mtd.loc[1, "software[1]-setting[7]"] = "enzyme:" + enzyme
     out_mztab_mtd.loc[1, "software[1]-setting[8]"] = "enzyme_term_specificity:full"
     out_mztab_mtd.loc[1, "software[1]-setting[9]"] = "charges:" + str(charge)
-    out_mztab_mtd.loc[1, "software[1]-setting[10]"] = "missed_cleavages:" + str(
-        missed_cleavages
-    )
-    out_mztab_mtd.loc[1, "software[1]-setting[11]"] = (
-            "fixed_modifications:" + fixed_modifications
-    )
+    out_mztab_mtd.loc[1, "software[1]-setting[10]"] = "missed_cleavages:" + str(missed_cleavages)
+    out_mztab_mtd.loc[1, "software[1]-setting[11]"] = "fixed_modifications:" + fixed_modifications
     out_mztab_mtd.loc[1, "software[1]-setting[12]"] = (
-            "variable_modifications:" + variable_modifications
+        "variable_modifications:" + variable_modifications
     )
 
     (fixed_mods, variable_mods, fix_flag, var_flag) = mtd_mod_info(
@@ -621,21 +618,15 @@ def mztab_mtd(index_ref, dia_params, fasta, charge, missed_cleavages, diann_vers
     if fix_flag == 1:
         for i in range(1, len(fixed_mods) + 1):
             out_mztab_mtd.loc[1, "fixed_mod[" + str(i) + "]"] = fixed_mods[i - 1][0]
-            out_mztab_mtd.loc[1, "fixed_mod[" + str(i) + "]-site"] = fixed_mods[i - 1][
-                1
-            ]
+            out_mztab_mtd.loc[1, "fixed_mod[" + str(i) + "]-site"] = fixed_mods[i - 1][1]
             out_mztab_mtd.loc[1, "fixed_mod[" + str(i) + "]-position"] = "Anywhere"
     else:
         out_mztab_mtd.loc[1, "fixed_mod[1]"] = fixed_mods[0]
 
     if var_flag == 1:
         for i in range(1, len(variable_mods) + 1):
-            out_mztab_mtd.loc[1, "variable_mod[" + str(i) + "]"] = variable_mods[i - 1][
-                0
-            ]
-            out_mztab_mtd.loc[1, "variable_mod[" + str(i) + "]-site"] = variable_mods[
-                i - 1
-                ][1]
+            out_mztab_mtd.loc[1, "variable_mod[" + str(i) + "]"] = variable_mods[i - 1][0]
+            out_mztab_mtd.loc[1, "variable_mod[" + str(i) + "]-site"] = variable_mods[i - 1][1]
             out_mztab_mtd.loc[1, "variable_mod[" + str(i) + "]-position"] = "Anywhere"
     else:
         out_mztab_mtd.loc[1, "variable_mod[1]"] = variable_mods[0]
@@ -646,34 +637,35 @@ def mztab_mtd(index_ref, dia_params, fasta, charge, missed_cleavages, diann_vers
     out_mztab_mtd.loc[1, "protein-quantification_unit"] = "[, , Abundance, ]"
     out_mztab_mtd.loc[1, "peptide-quantification_unit"] = "[, , Abundance, ]"
 
-    for i in range(1, max(index_ref["ms_run"]) + 1):
-        out_mztab_mtd.loc[1, "ms_run[" + str(i) + "]-format"] = (
-            "[MS, MS:1000584, mzML file, ]"
-        )
+    # Construct ms run index
+    ms_run_index = {}
+    for i in range(1, len(index_ref["Run"]) + 1):
+        out_mztab_mtd.loc[1, "ms_run[" + str(i) + "]-format"] = "[MS, MS:1000584, mzML file, ]"
         out_mztab_mtd.loc[1, "ms_run[" + str(i) + "]-location"] = (
-                "file://"
-                + index_ref[index_ref["ms_run"] == i]["Spectra_Filepath"].values[0]
+                "file://" + index_ref.loc[i - 1, "Spectra_Filepath"]
         )
         out_mztab_mtd.loc[1, "ms_run[" + str(i) + "]-id_format"] = (
             "[MS, MS:1000777, spectrum identifier nativeID format, ]"
         )
+        ms_run_index[index_ref.loc[i - 1, "Run"]] = i
+
+    # Construct assay index by sample
+    for i in range(1, max(index_ref["study_variable"]) + 1):
+        assays_run = []
+        for j in list(index_ref[index_ref["study_variable"] == i].index):
+            assays_run.append("ms_run[" + str(j + 1) + "]")
+
         out_mztab_mtd.loc[1, "assay[" + str(i) + "]-quantification_reagent"] = (
             "[MS, MS:1002038, unlabeled sample, ]"
         )
-        out_mztab_mtd.loc[1, "assay[" + str(i) + "]-ms_run_ref"] = (
-                "ms_run[" + str(i) + "]"
-        )
+        out_mztab_mtd.loc[1, "assay[" + str(i) + "]-ms_run_ref"] = ",".join(assays_run)
 
+    # Construct assay index by sample
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         # This is used here in order to ignore performance warnings from pandas.
         for i in range(1, max(index_ref["study_variable"]) + 1):
-            study_variable = []
-            for j in list(index_ref[index_ref["study_variable"] == i]["ms_run"].values):
-                study_variable.append("assay[" + str(j) + "]")
-            out_mztab_mtd.loc[1, "study_variable[" + str(i) + "]-assay_refs"] = (
-                ",".join(study_variable)
-            )
+            out_mztab_mtd.loc[1, "study_variable[" + str(i) + "]-assay_refs"] = "assay[" + str(i) + "]"
             out_mztab_mtd.loc[1, "study_variable[" + str(i) + "]-description"] = (
                 "no description given"
             )
@@ -694,10 +686,10 @@ def mztab_mtd(index_ref, dia_params, fasta, charge, missed_cleavages, diann_vers
     out_mztab_mtd_t.insert(0, "index", index)
     database = os.path.basename(fasta.split(".")[-2])
 
-    return out_mztab_mtd_t, database
+    return out_mztab_mtd_t, database, ms_run_index
 
 
-def mztab_prh(report, pg, index_ref, database, fasta_df):
+def mztab_prh(report, pg, index_ref, database, fasta_df, diann_version):
     """
     Construct PRH sub-table.
 
@@ -711,6 +703,8 @@ def mztab_prh(report, pg, index_ref, database, fasta_df):
     :type database: str
     :param fasta_df: A dataframe contains protein IDs, sequences and lengths
     :type fasta_df: pandas.core.frame.DataFrame
+    :param diann_version: DIA-NN version
+    :type diann_version: str
     :return: PRH sub-table
     :rtype: pandas.core.frame.DataFrame
     """
@@ -721,16 +715,6 @@ def mztab_prh(report, pg, index_ref, database, fasta_df):
         f" input index_ref shape: {index_ref.shape},"
         f" input fasta_df shape: {fasta_df.shape}"
     )
-    file = list(pg.columns[5:])
-    col = {}
-    for i in file:
-        col[i] = (
-                "protein_abundance_assay["
-                + str(index_ref[index_ref["Run"] == _true_stem(i)]["ms_run"].values[0])
-                + "]"
-        )
-
-    pg.rename(columns=col, inplace=True)
 
     logger.debug("Classifying results type ...")
     pg["opt_global_result_type"] = "single_protein"
@@ -785,13 +769,19 @@ def mztab_prh(report, pg, index_ref, database, fasta_df):
     if len(protein_details_df) > 0:
         logger.info(f"Found {len(protein_details_df)} indistinguishable protein groups")
         # The Following line fails if there are no indistinguishable protein groups
-        protein_details_df.loc[:, "col"] = "protein_details"
+        protein_details_df.loc[:, "opt_global_result_type"] = "protein_details"
         # protein_details_df = protein_details_df[-protein_details_df["accession"].str.contains("-")]
-        out_mztab_prh = pd.concat([out_mztab_prh, protein_details_df]).reset_index(
-            drop=True
-        )
+        out_mztab_prh = pd.concat([out_mztab_prh, protein_details_df], ignore_index=True).reset_index(drop=True)
     else:
         logger.info("No indistinguishable protein groups found")
+
+    # Rename file name to protein abundance, and calculate mean of ms runs from same sample
+    for i in range(1, max(index_ref["study_variable"]) + 1):
+        assays_run = []
+        for j in list(index_ref[index_ref["study_variable"] == i].index):
+            assays_run.append(os.path.basename(index_ref.loc[j, "Spectra_Filepath"]))
+        out_mztab_prh["protein_abundance_assay[" + str(i) + "]"] = out_mztab_prh[assays_run].mean(axis=1)
+        out_mztab_prh.drop(assays_run, inplace=True, axis=1)
 
     logger.debug("Calculating protein coverage (bottleneck)...")
     # This is a bottleneck
@@ -816,12 +806,10 @@ def mztab_prh(report, pg, index_ref, database, fasta_df):
 
     logger.debug("Matching PRH to best search engine score...")
     score_looker = ModScoreLooker(report)
-    out_mztab_prh[["modifiedSequence", "best_search_engine_score[1]"]] = (
-        out_mztab_prh.apply(
-            lambda x: score_looker.get_score(x["Protein.Group"]),
-            axis=1,
-            result_type="expand",
-        )
+    out_mztab_prh[["modifiedSequence", "best_search_engine_score[1]"]] = out_mztab_prh.apply(
+        lambda x: score_looker.get_score(x["Protein.Group"]),
+        axis=1,
+        result_type="expand",
     )
 
     logger.debug("Matching PRH to modifications...")
@@ -842,8 +830,7 @@ def mztab_prh(report, pg, index_ref, database, fasta_df):
         .reset_index()
     )
     protein_agg_report.columns = [
-        "::".join([str(s) for s in col]).strip()
-        for col in protein_agg_report.columns.values
+        "::".join([str(s) for s in col]).strip() for col in protein_agg_report.columns.values
     ]
     subname_mapper = {
         "Protein.Group::::": "Protein.Group",
@@ -871,9 +858,7 @@ def mztab_prh(report, pg, index_ref, database, fasta_df):
 
     out_mztab_prh.loc[:, "PRH"] = "PRT"
     index = out_mztab_prh.loc[:, "PRH"]
-    out_mztab_prh.drop(
-        ["PRH", "Genes", "modifiedSequence", "Protein.Group"], axis=1, inplace=True
-    )
+    out_mztab_prh.drop(["PRH", "Genes", "modifiedSequence", "Protein.Group"], axis=1, inplace=True)
     out_mztab_prh.insert(0, "PRH", index)
     out_mztab_prh.fillna("null", inplace=True)
     out_mztab_prh.loc[:, "database"] = database
@@ -890,6 +875,7 @@ def mztab_peh(
         precursor_list: List[str],
         index_ref: pd.DataFrame,
         database: os.PathLike,
+        ms_run_index: Dict
 ) -> pd.DataFrame:
     """
     Construct PEH sub-table.
@@ -904,6 +890,8 @@ def mztab_peh(
     :type index_ref: pandas.core.frame.DataFrame
     :param database: Path to fasta file
     :type database: str
+    :param ms_run_index: Dict for MS run index
+    :type ms_run_index: dict
     :return: PEH sub-table
     :rtype: pandas.core.frame.DataFrame
     """
@@ -914,7 +902,6 @@ def mztab_peh(
         f" len(precursor_list): {len(precursor_list)},"
         f" index_ref.shape: {index_ref.shape}"
     )
-    out_mztab_peh = pd.DataFrame()
     out_mztab_peh = pr.iloc[:, 0:10]
     out_mztab_peh.drop(
         ["Protein.Ids", "Protein.Names", "First.Protein.Description", "Proteotypic"],
@@ -939,13 +926,11 @@ def mztab_peh(
     )
 
     logger.debug("Extracting sequence...")
-    out_mztab_peh.loc[:, "opt_global_cv_MS:1000889_peptidoform_sequence"] = (
-        out_mztab_peh.apply(
-            lambda x: AASequence.fromString(
-                x["opt_global_cv_MS:1000889_peptidoform_sequence"]
-            ).toString(),
-            axis=1,
-        )
+    out_mztab_peh.loc[:, "opt_global_cv_MS:1000889_peptidoform_sequence"] = out_mztab_peh.apply(
+        lambda x: AASequence.fromString(
+            x["opt_global_cv_MS:1000889_peptidoform_sequence"]
+        ).toString(),
+        axis=1,
     )
 
     logger.debug("Checking accession uniqueness...")
@@ -964,7 +949,6 @@ def mztab_peh(
     ]
     for i in null_col:
         out_mztab_peh.loc[:, i] = "null"
-    out_mztab_peh.loc[:, "opt_global_cv_MS:1002217_decoy_peptide"] = "0"
 
     logger.debug("Matching precursor IDs...")
     # Pre-calculating the indices and using a lookup table drops run time from
@@ -977,14 +961,18 @@ def mztab_peh(
     logger.debug("Getting scores per run")
     # This implementation is 422-700x faster than the apply-based one
     tmp = (
-        report.groupby(["precursor.Index", "ms_run"])
+        report.groupby(["precursor.Index", "Run"])
         .agg({"Q.Value": ["min"]})
         .reset_index()
-        .pivot(columns=["ms_run"], index="precursor.Index")
+        .pivot(columns=["Run"], index="precursor.Index")
         .reset_index()
     )
+
     tmp.columns = pd.Index(
-        ["::".join([str(s) for s in col]).strip() for col in tmp.columns.values]
+        ["::".join([str(s) if s in ["precursor.Index",
+                                    "Q.Value",
+                                    "min",
+                                    ""] else str(ms_run_index[s]) for s in col]).strip() for col in tmp.columns.values]
     )
     subname_mapper = {
         "precursor.Index::::": "precursor.Index",
@@ -1047,6 +1035,14 @@ def mztab_peh(
     out_mztab_peh.loc[:, "PEH"] = "PEP"
     out_mztab_peh.loc[:, "database"] = str(database)
     index = out_mztab_peh.loc[:, "PEH"]
+    # Merge Decoy, I think Decoy is unique for Precursor.
+    if "Decoy" in report.columns:
+        out_mztab_peh = pd.merge(out_mztab_peh, report[["Precursor.Id", "Decoy"]].drop_duplicates(),
+                                 on="Precursor.Id", how="inner")
+        out_mztab_peh.rename(columns={"Decoy": "opt_global_cv_MS:1002217_decoy_peptide"}, inplace=True)
+    else:
+        out_mztab_peh.loc[:, "opt_global_cv_MS:1002217_decoy_peptide"] = "0"
+
     out_mztab_peh.drop(["PEH", "Precursor.Id", "Genes", "pr_id"], axis=1, inplace=True)
     out_mztab_peh.insert(0, "PEH", index)
     out_mztab_peh.fillna("null", inplace=True)
@@ -1058,7 +1054,7 @@ def mztab_peh(
     return out_mztab_peh
 
 
-def mztab_psh(report, folder, database):
+def mztab_psh(report, folder, database, ms_run_index):
     """
     Construct PSH sub-table.
 
@@ -1070,6 +1066,8 @@ def mztab_psh(report, folder, database):
     :type folder: str
     :param database: Path to fasta file
     :type database: str
+    :param ms_run_index: Dict for MS run index
+    :type ms_run_index: dict
     :return: PSH sub-table
     :rtype: pandas.core.frame.DataFrame
     """
@@ -1097,11 +1095,13 @@ def mztab_psh(report, folder, database):
 
         file = __find_info(folder, n)
         target = pd.read_parquet(file)
-        target = target[target["MSLevel"] == 2]
+        # Read original parquet columns from mzml_stats
+        target = target[target[MS_LEVEL] == 2]
         target.reset_index(inplace=True, drop=True)
         target["DIANN-intraID"] = target.index
         group.sort_values(by="RT", inplace=True)
-        target = target[["Retention_Time", "SpectrumID", "DIANN-intraID", "Exp_Mass_To_Charge"]]
+        target = target[[RETENTION_TIME, SCAN, "DIANN-intraID", EXPERIMENTAL_MASS_TO_CHARGE]]
+
         target.columns = [
             "RT",
             "opt_global_spectrum_reference",
@@ -1115,78 +1115,129 @@ def mztab_psh(report, folder, database):
                                                                        ].astype(str)
 
         # TODO seconds returned from precursor.getRT()
-        target.loc[:, "RT"] = target.apply(lambda x: x["RT"] / 60, axis=1)
+        # RT column of DIA-NN 2.0.* is float32 type, but RT column of DIA-NN 1.8.* is float64 type
+        target.loc[:, "RT"] = target.apply(lambda x: (x["RT"] / 60), axis=1)
+        group['RT'] = group['RT'].astype('float64')
 
-        RT_matched = pd.merge_asof(group, target, on="RT", direction="nearest")
-        new_target = target
-        new_target.columns = [
-            "scan_RT",
-            "scan_opt_global_spectrum_reference",
-            "MS2.Scan",
-            "scan_exp_mass_to_charge",
-        ]
-        scan_matched = pd.merge(RT_matched, new_target, on="MS2.Scan")
-
-        #  Cross validation spectrum ID between scan matched and RT matched
-        # Keep Scan matched When RT matched and DIA-NN Scan matched are inconsistent in mzML.
-        scan_matched["unassigned_matched"] = scan_matched.apply(
-            lambda row: 1 if row["MS2.Scan"] != row["DIANN-intraID"] else 0, axis=1)
-        if len(scan_matched[scan_matched["unassigned_matched"] == 1]) > 0:
-            v_str = scan_matched[scan_matched["unassigned_matched"] == 1]["MS2.Scan"].tolist()
-            logger.info(f"RT matched and DIA-NN Scan matched are inconsistent in mzML. Keep Scan matched: {v_str}")
-            scan_matched.drop(["RT", "opt_global_spectrum_reference", "DIANN-intraID", "exp_mass_to_charge", "unassigned_matched"],
-                              inplace=True, axis=1)
-            scan_matched.rename(
-                columns={"scan_RT": "RT", "scan_opt_global_spectrum_reference": "opt_global_spectrum_reference",
-                         "scan_exp_mass_to_charge": "exp_mass_to_charge"}, inplace=True)
-        else:
-            scan_matched.drop(["scan_RT", "scan_opt_global_spectrum_reference", "scan_exp_mass_to_charge", "unassigned_matched"],
-                              inplace=True, axis=1)
-
-        out_mztab_psh = pd.concat(
-            [
-                out_mztab_psh,
-                scan_matched
+        rt_matched = pd.merge_asof(group, target, on="RT", direction="nearest")
+        # DIA-NN can't export MS2.Scan column in some versions (eg. DIA-NN 2.0, DIA-NN 2.0.1).
+        # So we only match MS2 by RT.
+        if "MS2.Scan" in group.columns:
+            logger.info("Mapping DIA-NN MS2 to mzML by MS2.Scan and RT columns")
+            new_target = target
+            new_target.columns = [
+                "scan_RT",
+                "scan_opt_global_spectrum_reference",
+                "MS2.Scan",
+                "scan_exp_mass_to_charge",
             ]
-        )
+            scan_matched = pd.merge(rt_matched, new_target, on="MS2.Scan")
+
+            #  Cross validation spectrum ID between scan matched and RT matched
+            # Keep Scan matched When RT matched and DIA-NN Scan matched are inconsistent in mzML.
+            scan_matched["unassigned_matched"] = scan_matched.apply(
+                lambda row: 1 if row["MS2.Scan"] != row["DIANN-intraID"] else 0, axis=1
+            )
+            if len(scan_matched[scan_matched["unassigned_matched"] == 1]) > 0:
+                v_str = scan_matched[scan_matched["unassigned_matched"] == 1]["MS2.Scan"].tolist()
+                logger.info(
+                    f"RT matched and DIA-NN Scan matched are inconsistent in mzML. Keep Scan matched: {v_str}"
+                )
+                scan_matched.drop(
+                    [
+                        "RT",
+                        "opt_global_spectrum_reference",
+                        "DIANN-intraID",
+                        "exp_mass_to_charge",
+                        "unassigned_matched",
+                    ],
+                    inplace=True,
+                    axis=1,
+                )
+                scan_matched.rename(
+                    columns={
+                        "scan_RT": "RT",
+                        "scan_opt_global_spectrum_reference": "opt_global_spectrum_reference",
+                        "scan_exp_mass_to_charge": "exp_mass_to_charge",
+                    },
+                    inplace=True,
+                )
+            else:
+                scan_matched.drop(
+                    [
+                        "scan_RT",
+                        "scan_opt_global_spectrum_reference",
+                        "scan_exp_mass_to_charge",
+                        "unassigned_matched",
+                    ],
+                    inplace=True,
+                    axis=1,
+                )
+
+            out_mztab_psh = pd.concat([out_mztab_psh, scan_matched])
+        else:
+            logger.info("MS2.Scan column isn't in DIA-NN report, only Matching MS2 by RT values")
+            out_mztab_psh = pd.concat([out_mztab_psh, rt_matched])
 
     del report
 
     # Score at PSM level: Q.Value
-    out_mztab_psh = out_mztab_psh[
-        [
-            "Stripped.Sequence",
-            "Protein.Group",
-            "Q.Value",
-            "RT",
-            "Precursor.Charge",
-            "Calculate.Precursor.Mz",
-            "exp_mass_to_charge",
-            "Modified.Sequence",
-            "PEP",
-            "Global.Q.Value",
-            "Global.Q.Value",
-            "opt_global_spectrum_reference",
-            "ms_run",
-        ]
-    ]
-    out_mztab_psh.columns = [
-        "sequence",
-        "accession",
-        "search_engine_score[1]",
-        "retention_time",
-        "charge",
-        "calc_mass_to_charge",
+    psm_columns = [
+        "Stripped.Sequence",
+        "Protein.Group",
+        "Q.Value",
+        "RT",
+        "Precursor.Charge",
+        "Calculate.Precursor.Mz",
         "exp_mass_to_charge",
-        "opt_global_cv_MS:1000889_peptidoform_sequence",
-        "opt_global_SpecEValue_score",
-        "opt_global_q-value",
-        "opt_global_q-value_score",
+        "Modified.Sequence",
+        "PEP",
+        "Global.Q.Value",
+        "Global.Q.Value",
         "opt_global_spectrum_reference",
-        "ms_run",
+        "Run",
     ]
 
-    out_mztab_psh.loc[:, "opt_global_cv_MS:1002217_decoy_peptide"] = "0"
+    if "Decoy" in out_mztab_psh.columns:
+        out_mztab_psh = out_mztab_psh[
+            psm_columns + ["Decoy"]
+            ]
+        out_mztab_psh.columns = [
+            "sequence",
+            "accession",
+            "search_engine_score[1]",
+            "retention_time",
+            "charge",
+            "calc_mass_to_charge",
+            "exp_mass_to_charge",
+            "opt_global_cv_MS:1000889_peptidoform_sequence",
+            "opt_global_SpecEValue_score",
+            "opt_global_q-value",
+            "opt_global_q-value_score",
+            "opt_global_spectrum_reference",
+            "ms_run",
+            "opt_global_cv_MS:1002217_decoy_peptide"
+        ]
+    else:
+        out_mztab_psh = out_mztab_psh[
+            psm_columns
+        ]
+        out_mztab_psh.columns = [
+            "sequence",
+            "accession",
+            "search_engine_score[1]",
+            "retention_time",
+            "charge",
+            "calc_mass_to_charge",
+            "exp_mass_to_charge",
+            "opt_global_cv_MS:1000889_peptidoform_sequence",
+            "opt_global_SpecEValue_score",
+            "opt_global_q-value",
+            "opt_global_q-value_score",
+            "opt_global_spectrum_reference",
+            "ms_run"
+        ]
+        out_mztab_psh.loc[:, "opt_global_cv_MS:1002217_decoy_peptide"] = 0
     out_mztab_psh.loc[:, "PSM_ID"] = out_mztab_psh.index
     out_mztab_psh.loc[:, "unique"] = out_mztab_psh.apply(
         lambda x: "0" if ";" in str(x["accession"]) else "1",
@@ -1216,20 +1267,17 @@ def mztab_psh(report, folder, database):
     )
 
     out_mztab_psh.loc[:, "spectra_ref"] = out_mztab_psh.apply(
-        lambda x: "ms_run[{}]:".format(x["ms_run"])
-                  + x["opt_global_spectrum_reference"],
+        lambda x: "ms_run[{}]:".format(ms_run_index[x["ms_run"]]) + x["opt_global_spectrum_reference"],
         axis=1,
         result_type="expand",
     )
 
-    out_mztab_psh.loc[:, "opt_global_cv_MS:1000889_peptidoform_sequence"] = (
-        out_mztab_psh.apply(
-            lambda x: AASequence.fromString(
-                x["opt_global_cv_MS:1000889_peptidoform_sequence"]
-            ).toString(),
-            axis=1,
-            result_type="expand",
-        )
+    out_mztab_psh.loc[:, "opt_global_cv_MS:1000889_peptidoform_sequence"] = out_mztab_psh.apply(
+        lambda x: AASequence.fromString(
+            x["opt_global_cv_MS:1000889_peptidoform_sequence"].replace("^", "")
+        ).toString(),
+        axis=1,
+        result_type="expand",
     )
 
     out_mztab_psh.loc[:, "PSH"] = "PSM"
@@ -1246,24 +1294,6 @@ def mztab_psh(report, folder, database):
     return out_mztab_psh
 
 
-def add_info(target, index_ref):
-    """
-    On the basis of f_table, two columns "ms_run" and "study_variable" are added for matching.
-
-    :param target: The value of "Run" column in f_table
-    :type target: str
-    :param index_ref: A dataframe on the basis of f_table
-    :type index_ref: pandas.core.frame.DataFrame
-    :return: A tuple contains ms_run and study_variable
-    :rtype: tuple
-    """
-    match = index_ref[index_ref["Run"] == target]
-    ms_run = match["ms_run"].values[0]
-    study_variable = match["study_variable"].values[0]
-
-    return ms_run, study_variable
-
-
 def classify_result_type(target):
     """Classify proteins
 
@@ -1275,64 +1305,6 @@ def classify_result_type(target):
     if ";" in target["Protein.Group"]:
         return "indistinguishable_protein_group"
     return "single_protein"
-
-
-def match_in_report(report, target, max_, flag, level):
-    """
-    This function is used to match the columns "ms_run" and "study_variable" from the report and
-    get the corresponding information for the mztab ms_run and study_values metadata values.
-
-    :param report: Dataframe for Dia-NN main report
-    :type report: pandas.core.frame.DataFrame
-    :param target: The value of "pr_id" column in out_mztab_PEH(level="peptide") or the "accession" column in out_mztab_PRH(level="protein")
-    :type target: str
-    :param max_: max_assay or max_study_variable
-    :type max_: int
-    :param flag: Match the "study_variable" column(flag=1) or the "ms_run" column(flag=0) in the filter result
-    :type flag: int
-    :param level: "pep" or "protein"
-    :type level: str
-    :return: A tuple contains multiple messages
-    :rtype: tuple
-    """  # noqa
-    if flag == 1 and level == "pep":
-        result = report[report["precursor.Index"] == target]
-        peh_params = []
-        for i in range(1, max_ + 1):
-            match = result[result["study_variable"] == i]
-            peh_params.extend(
-                [
-                    match["Precursor.Normalised"].mean(),
-                    "null",
-                    "null",
-                    "null",
-                    match["RT.Start"].mean(),
-                ]
-            )
-
-        return tuple(peh_params)
-
-    if flag == 0 and level == "pep":
-        result = report[report["precursor.Index"] == target]
-        q_value = []
-        for i in range(1, max_ + 1):
-            match = result[result["ms_run"] == i]
-            q_value.append(
-                match["Q.Value"].values[0]
-                if match["Q.Value"].values.size > 0
-                else np.nan
-            )
-
-        return tuple(q_value)
-
-    if flag == 1 and level == "protein":
-        result = report[report["Protein.Group"] == target]
-        prh_params = []
-        for i in range(1, max_ + 1):
-            match = result[result["study_variable"] == i]
-            prh_params.extend([match["PG.MaxLFQ"].mean(), "null", "null"])
-
-        return tuple(prh_params)
 
 
 class ModScoreLooker:
@@ -1422,9 +1394,7 @@ def find_modification(peptide):
     for k, mod in enumerate(original_mods):
         original_mods[k] = str(position[k]) + "-" + mod.upper()
 
-    original_mods = (
-        ",".join(str(i) for i in original_mods) if len(original_mods) > 0 else "null"
-    )
+    original_mods = ",".join(str(i) for i in original_mods) if len(original_mods) > 0 else "null"
 
     return original_mods
 
@@ -1519,10 +1489,7 @@ def per_peptide_study_report(report: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     pep_study_grouped.columns = pd.Index(
-        [
-            "::".join([str(s) for s in col]).strip()
-            for col in pep_study_grouped.columns.values
-        ]
+        ["::".join([str(s) for s in col]).strip() for col in pep_study_grouped.columns.values]
     )
     # Columns here would be like:
     # [
@@ -1589,8 +1556,7 @@ def calculate_coverage(ref_sequence: str, sequences: Set[str]):
     for start, length in sorted(zip(starts, lengths)):
         if merged_starts and merged_starts[-1] + merged_lengths[-1] >= start:
             merged_lengths[-1] = (
-                    max(merged_starts[-1] + merged_lengths[-1], start + length)
-                    - merged_starts[-1]
+                    max(merged_starts[-1] + merged_lengths[-1], start + length) - merged_starts[-1]
             )
         else:
             merged_starts.append(start)
@@ -1632,9 +1598,7 @@ def calculate_protein_coverages(
         # I am pretty sure this is the slowest part of the code
         matches = fasta_df[fasta_df["id"].str.contains(acc)]["id"]
         if len(matches) == 0:
-            logger.warning(
-                f"Could not find fasta id for accession {acc} in the fasta file."
-            )
+            logger.warning(f"Could not find fasta id for accession {acc} in the fasta file.")
             acc_to_fasta_ids[acc] = None
         elif len(matches) == 1:
             acc_to_fasta_ids[acc] = matches.iloc[0]
@@ -1651,9 +1615,7 @@ def calculate_protein_coverages(
         if f_id is None:
             out_cov = "null"
         else:
-            cov = calculate_coverage(
-                fasta_id_to_seqs[f_id], ids_to_seqs[acc_to_ids[acc]]
-            )
+            cov = calculate_coverage(fasta_id_to_seqs[f_id], ids_to_seqs[acc_to_ids[acc]])
             out_cov = format(cov, ".03f")
 
         out[i] = out_cov
